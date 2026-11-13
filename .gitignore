@@ -1,0 +1,10 @@
+# Backups and reports the modules may write when run from here
+UninstallBackups/
+*.reg
+*.log
+
+# OS / editor noise
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
