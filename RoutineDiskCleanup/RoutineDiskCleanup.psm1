@@ -188,6 +188,11 @@ function Get-RoutineCleanupTargets {
         Description='Intel shader cache.' }
     $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $local 'D3DSCache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Direct3D shader cache.' }
+    $steamRoot = Get-RoutineCleanupSteamRoot
+    if ($steamRoot) {
+        $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $steamRoot 'steamapps\shadercache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+            Description='Steam per-game shader pre-caches. Steam re-downloads or rebuilds them on next launch.' }
+    }
 
     # --- BrowserCache (opt-in): browsers should be closed; locked files are skipped ---
     $browserRoots = @(
@@ -214,6 +219,23 @@ function Get-RoutineCleanupTargets {
         Description='VS Code V8 code cache.' }
     $targets += [PSCustomObject]@{ Category='EditorCache'; Method='Path'; Path=(Join-Path $roaming 'Code\CachedExtensionVSIXs'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
         Description='Downloaded extension installers VS Code keeps after installing them.' }
+
+    # --- GameLauncher: launcher self-update leftovers, logs, and embedded-browser caches ---
+    $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Command'; Path=(Join-Path $programData 'Ubisoft\Ubisoft Game Launcher\patch'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+        Description='Old Ubisoft Connect self-update builds (~575 MB each, one per launcher update). The build named in patch.txt and the newest build are always kept. Skipped while Ubisoft Connect is running.' }
+    $steam = Get-RoutineCleanupSteamRoot
+    if ($steam) {
+        $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $steam 'logs'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+            Description='Steam client logs.' }
+        $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $steam 'dumps'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+            Description='Steam client crash dumps.' }
+    }
+    $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $local 'Steam\htmlcache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+        Description='Steam store and overlay browser cache. Close Steam first; locked files are skipped.' }
+    $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $local 'EpicGamesLauncher\Saved\Logs'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+        Description='Epic Games Launcher logs.' }
+    $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $local 'EpicGamesLauncher\Saved\webcache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+        Description='Epic Games Launcher browser cache. Close the launcher first.' }
 
     # --- WindowsUpdate (admin): leftover downloads and the peer-to-peer cache ---
     $targets += [PSCustomObject]@{ Category='WindowsUpdate'; Method='Command'; Path='Delete-DeliveryOptimizationCache'; MinAgeDays=0; RequiresAdmin=$true; Default=$true
@@ -295,6 +317,14 @@ function Get-RoutineCleanupCommandSize {
             if ($files.Count -eq 0) { return $null }
             return [PSCustomObject]@{ Bytes = ($files | Measure-Object -Property Length -Sum).Sum; Files = $files.Count; Note = '' }
         }
+        '*Ubisoft Game Launcher\patch' {
+            $old = Get-RoutineCleanupUbisoftOldPatches -PatchRoot $Target.Path
+            if ($null -eq $old) { return $null }
+            $old = @($old)
+            $note = ''
+            if ($old.Count -gt 0) { $note = "$($old.Count) old builds: $(($old | Select-Object -ExpandProperty Build) -join ', ')" }
+            return [PSCustomObject]@{ Bytes = [long]($old | Measure-Object -Property Bytes -Sum).Sum; Files = [int]($old | Measure-Object -Property Files -Sum).Sum; Note = $note }
+        }
         '*SoftwareDistribution\Download' {
             $files = @(Get-RoutineCleanupFiles -Path $Target.Path)
             if ($files.Count -eq 0) { return $null }
@@ -363,6 +393,56 @@ function Get-RoutineCleanupScoopOldVersions {
             if ($files.Count -gt 0) { $bytes = ($files | Measure-Object -Property Length -Sum).Sum }
             $old += [PSCustomObject]@{ App = $app.Name; Version = $v.Name; Path = $v.FullName; Bytes = $bytes; Files = $files.Count }
         }
+    }
+    return $old
+}
+
+function Get-RoutineCleanupSteamRoot {
+    try {
+        $path = (Get-ItemProperty -Path 'HKCU:\Software\Valve\Steam' -Name SteamPath -ErrorAction Stop).SteamPath
+        if ($path) {
+            $path = $path -replace '/', '\'
+            if (Test-Path -LiteralPath $path) { return $path }
+        }
+    } catch { }
+    $default = Join-Path ${env:ProgramFiles(x86)} 'Steam'
+    if (Test-Path -LiteralPath (Join-Path $default 'steam.exe')) { return $default }
+    return $null
+}
+
+function Test-RoutineCleanupUbisoftRunning {
+    return [bool](Get-Process -Name 'upc', 'UbisoftConnect', 'UplayWebCore', 'UplayService' -ErrorAction SilentlyContinue)
+}
+
+function Get-RoutineCleanupUbisoftOldPatches {
+    <#
+    .SYNOPSIS
+        Lists Ubisoft Connect self-update build folders that are neither the build patch.txt names
+        nor the newest build. Returns $null when the current build can't be determined, so nothing
+        is ever removed on a guess.
+    #>
+    param([string]$PatchRoot)
+
+    if (-not (Test-Path -LiteralPath $PatchRoot)) { return $null }
+
+    # patch.txt starts with the current build number, followed by that build's file list
+    $current = $null
+    try { $current = (Get-Content -LiteralPath (Join-Path $PatchRoot 'patch.txt') -TotalCount 1 -ErrorAction Stop).Trim() } catch { }
+    if (-not ($current -match '^\d+$')) { return $null }
+
+    $builds = @(Get-ChildItem -LiteralPath $PatchRoot -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d+$' -and (($_.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -eq 0) })
+    if ($builds.Count -eq 0) { return @() }
+
+    # Also keep the newest build, in case a download is newer than what patch.txt records
+    $newest = ($builds | Sort-Object { [long]$_.Name } -Descending | Select-Object -First 1).Name
+
+    $old = @()
+    foreach ($b in ($builds | Where-Object { $_.Name -ne $current -and $_.Name -ne $newest })) {
+        $files = @(Get-RoutineCleanupFiles -Path $b.FullName)
+        $bytes = [long]0
+        if ($files.Count -gt 0) { $bytes = ($files | Measure-Object -Property Length -Sum).Sum }
+        $old += [PSCustomObject]@{ Build = $b.Name; Path = $b.FullName; Bytes = $bytes; Files = $files.Count }
     }
     return $old
 }
@@ -443,6 +523,29 @@ function Invoke-RoutineCleanupCommand {
                 return [PSCustomObject]@{ FreedBytes = 0; Status = 'Failed'; Message = $_.Exception.Message }
             }
         }
+        '*Ubisoft Game Launcher\patch' {
+            if (Test-RoutineCleanupUbisoftRunning) {
+                return [PSCustomObject]@{ FreedBytes = 0; Status = 'Skipped'; Message = 'Ubisoft Connect is running; close it and run again.' }
+            }
+            $old = Get-RoutineCleanupUbisoftOldPatches -PatchRoot $Item.Path
+            if ($null -eq $old) {
+                return [PSCustomObject]@{ FreedBytes = 0; Status = 'Skipped'; Message = 'Could not read the current build from patch.txt; nothing removed.' }
+            }
+            $freed = [long]0
+            $removedBuilds = 0
+            $skipped = 0
+            foreach ($build in @($old)) {
+                # Clear contents without following reparse points, then drop the emptied build folder
+                $r = Remove-RoutineCleanupFolderContents -Path $build.Path
+                $freed += $r.FreedBytes
+                $skipped += $r.SkippedFiles
+                # Non-recursive delete: only succeeds if pruning left the folder truly empty
+                try { [System.IO.Directory]::Delete($build.Path, $false); $removedBuilds++ } catch { }
+            }
+            $status = 'Removed'
+            if ($skipped -gt 0) { $status = 'PartiallyRemoved' }
+            return [PSCustomObject]@{ FreedBytes = $freed; Status = $status; Message = "Removed $removedBuilds old builds, skipped $skipped locked files." }
+        }
         '*SoftwareDistribution\Download' {
             $services = @('wuauserv', 'bits')
             $wasRunning = @()
@@ -511,7 +614,7 @@ function Get-RoutineDiskCleanupInfo {
     [CmdletBinding()]
     param(
         [Parameter()]
-        [ValidateSet('TempFiles', 'CrashReports', 'PackageCache', 'DevDependencyCache', 'ShaderCache', 'BrowserCache', 'EditorCache', 'WindowsUpdate', 'ComponentStore', 'RecycleBin')]
+        [ValidateSet('TempFiles', 'CrashReports', 'PackageCache', 'DevDependencyCache', 'ShaderCache', 'BrowserCache', 'EditorCache', 'GameLauncher', 'WindowsUpdate', 'ComponentStore', 'RecycleBin')]
         [string[]]$Category,
 
         [Parameter()]
@@ -558,6 +661,8 @@ function Get-RoutineDiskCleanupInfo {
                 } elseif ($target.Path -like 'conda clean*' -and -not (Get-RoutineCleanupCondaExe)) {
                     continue
                 } elseif ($target.Path -like 'scoop cleanup*' -and -not (Get-RoutineCleanupScoopRoot)) {
+                    continue
+                } elseif ($target.Path -like '*Ubisoft Game Launcher\patch' -and -not (Test-Path -LiteralPath $target.Path)) {
                     continue
                 } elseif ($target.RequiresAdmin -and -not $elevated) {
                     # Can't measure without elevation; still list it so the user knows it exists
@@ -627,7 +732,7 @@ function Invoke-RoutineDiskCleanup {
         [PSCustomObject]$CleanupItem,
 
         [Parameter()]
-        [ValidateSet('TempFiles', 'CrashReports', 'PackageCache', 'DevDependencyCache', 'ShaderCache', 'BrowserCache', 'EditorCache', 'WindowsUpdate', 'ComponentStore', 'RecycleBin')]
+        [ValidateSet('TempFiles', 'CrashReports', 'PackageCache', 'DevDependencyCache', 'ShaderCache', 'BrowserCache', 'EditorCache', 'GameLauncher', 'WindowsUpdate', 'ComponentStore', 'RecycleBin')]
         [string[]]$Category,
 
         [Parameter()]
@@ -754,7 +859,7 @@ function Register-RoutineDiskCleanupTask {
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
         [Parameter()]
-        [ValidateSet('TempFiles', 'CrashReports', 'PackageCache', 'DevDependencyCache', 'ShaderCache', 'BrowserCache', 'EditorCache', 'WindowsUpdate', 'ComponentStore', 'RecycleBin')]
+        [ValidateSet('TempFiles', 'CrashReports', 'PackageCache', 'DevDependencyCache', 'ShaderCache', 'BrowserCache', 'EditorCache', 'GameLauncher', 'WindowsUpdate', 'ComponentStore', 'RecycleBin')]
         [string[]]$Category,
 
         [Parameter()]

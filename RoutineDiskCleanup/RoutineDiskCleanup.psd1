@@ -18,7 +18,7 @@
     Copyright = '(c) 2026 Jim Allers. MIT License.'
 
     # Description of the functionality provided by this module
-    Description = 'Audits and clears the easy, regenerable disk space wins on Windows (temp files, crash reports, package manager caches, shader caches, browser caches, update leftovers) by hand or on a weekly schedule.'
+    Description = 'Audits and clears the easy, regenerable disk space wins on Windows (temp files, crash reports, package manager caches, shader caches, browser caches, game launcher leftovers, update leftovers) by hand or on a weekly schedule.'
 
     # Minimum version of the Windows PowerShell engine required by this module
     PowerShellVersion = '5.1'

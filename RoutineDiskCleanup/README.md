@@ -2,7 +2,7 @@
 
 A PowerShell module that collects the easy disk space wins on a Windows machine into one audit-and-clean workflow you can run by hand or on a weekly schedule.
 
-Everything it touches is regenerable: temp files, crash reports, package manager download caches, GPU shader caches, browser and editor caches, and Windows Update leftovers. Nothing it clears is user data, with the single exception of the Recycle Bin, which is opt-in.
+Everything it touches is regenerable: temp files, crash reports, package manager download caches, GPU shader caches, browser and editor caches, game launcher update leftovers and logs, and Windows Update leftovers. Nothing it clears is user data, with the single exception of the Recycle Bin, which is opt-in.
 
 ---
 
@@ -86,9 +86,10 @@ The task is registered with wake-to-run **off**, so it never wakes a sleeping PC
 | **CrashReports** | Yes | CrashDumps, WER report queues and archives, Minidump, LiveKernelReports | System locations need elevation. |
 | **PackageCache** | Yes | npm, pip, uv, Scoop download cache, `scoop cleanup *`, Cargo `.crate` cache, Go build cache, Yarn, NuGet HTTP cache, `conda clean --all` | Pure download caches. The next install re-fetches what it needs. `scoop cleanup` removes only app versions that `current` does not point to. conda and Scoop steps only run if installed; conda keeps packages that environments link to. |
 | **DevDependencyCache** | No | NuGet global packages, extracted Cargo sources, Gradle caches | Safe, but the next restore or build is noticeably slower. |
-| **ShaderCache** | Yes | NVIDIA DXCache/GLCache, AMD DxCache, Intel ShaderCache, D3DSCache | Games rebuild shaders on next launch; expect brief stutter once. Overlaps with NvidiaUpdateCleaner's ShaderCache category. |
+| **ShaderCache** | Yes | NVIDIA DXCache/GLCache, AMD DxCache, Intel ShaderCache, D3DSCache, Steam `steamapps\shadercache` | Games rebuild shaders on next launch; expect brief stutter once. Overlaps with NvidiaUpdateCleaner's ShaderCache category. |
 | **BrowserCache** | No | Cache, Code Cache, GPUCache for every Chrome, Edge, and Brave profile | Close the browser first. Locked files are skipped. Does not touch history, cookies, or logins. |
 | **EditorCache** | No | VS Code Cache, CachedData, CachedExtensionVSIXs | Close VS Code first. |
+| **GameLauncher** | Yes | Old Ubisoft Connect self-update builds in `ProgramData\Ubisoft\Ubisoft Game Launcher\patch`; Steam logs, dumps, and `htmlcache`; Epic Games Launcher logs and `webcache` | Ubisoft keeps one ~575 MB build folder per launcher update and never prunes them, so this grows by several GB a year. The build named in `patch.txt` and the newest build are always kept, nothing is removed if `patch.txt` can't be read, and the step is skipped while Ubisoft Connect is running. Close Steam and Epic for a full browser-cache clear; locked files are skipped. |
 | **WindowsUpdate** | Partly | Delivery Optimization cache (default); `SoftwareDistribution\Download` (opt-in) | Needs elevation. The SoftwareDistribution step stops and restarts the Windows Update and BITS services. |
 | **ComponentStore** | No | `DISM /Online /Cleanup-Image /StartComponentCleanup` | Needs elevation and takes minutes. Windows runs the same cleanup itself after a 30-day grace; this skips the wait. Pass `-ResetBase` to `Invoke-RoutineDiskCleanup` for the aggressive form (see below). |
 | **RecycleBin** | No | Empties the Recycle Bin on all drives | Opt-in because it is the one thing here that is technically user data. |
