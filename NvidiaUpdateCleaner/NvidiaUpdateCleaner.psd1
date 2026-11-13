@@ -14,9 +14,6 @@
     # Author of this module
     Author = 'Jim Allers'
 
-    # Company or vendor of this module
-    CompanyName = 'Windows Admin Helpers'
-
     # Copyright statement for this module
     Copyright = '(c) 2026 Jim Allers. MIT License.'
 
