@@ -93,6 +93,13 @@ Unregister-RoutineDiskCleanupTask
 
 The task is registered with wake-to-run **off**, so it never wakes a sleeping PC.
 
+By default the task runs **only while you are signed in**; if you're signed out at the scheduled time, it catches up the next time you sign in. On a PC someone else mostly uses, add `-RunWhenLoggedOff` (from an elevated session) so it runs regardless. It uses Task Scheduler's S4U logon, so no password is stored; the task gets no network credentials, which a local cleanup doesn't need.
+
+```powershell
+# Shared or family PC: every account, whether or not you're signed in
+Register-RoutineDiskCleanupTask -AllUsers -RunElevated -RunWhenLoggedOff
+```
+
 ---
 
 ## Categories

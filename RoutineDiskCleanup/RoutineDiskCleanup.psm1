@@ -366,7 +366,8 @@ function Get-RoutineCleanupCommandSize {
         'Delete-DeliveryOptimizationCache' {
             # The service knows its own cache size and location; ask it first (works unelevated)
             try {
-                $status = @(Get-DeliveryOptimizationStatus -ErrorAction Stop)
+                # Warns "No active ... jobs" when the cache is idle; that's not an error here
+                $status = @(Get-DeliveryOptimizationStatus -ErrorAction Stop -WarningAction SilentlyContinue)
                 if ($status.Count -gt 0) {
                     $bytes = [long]($status | Measure-Object -Property FileSizeInCache -Sum).Sum
                     if ($bytes -gt 0) { return [PSCustomObject]@{ Bytes = $bytes; Files = $status.Count; Note = '' } }
@@ -938,12 +939,20 @@ function Register-RoutineDiskCleanupTask {
         Register the task to run with highest privileges. Requires an elevated session to register.
     .PARAMETER AllUsers
         Also clean every other user profile's caches. Requires -RunElevated.
+    .PARAMETER RunWhenLoggedOff
+        Run the task whether or not you are signed in, instead of only while you are. Uses the S4U
+        logon type, so no password is stored; the task gets no network credentials, which a local
+        cleanup does not need. Use this on a PC someone else mostly uses. Requires an elevated
+        session to register.
     .PARAMETER TaskName
         Name of the scheduled task. Defaults to 'RoutineDiskCleanup'.
     .EXAMPLE
         Register-RoutineDiskCleanupTask
     .EXAMPLE
         Register-RoutineDiskCleanupTask -Category TempFiles, PackageCache, ShaderCache -DayOfWeek Saturday -At '04:30' -RunElevated
+    .EXAMPLE
+        # Shared PC: clean every account, even when you are not signed in
+        Register-RoutineDiskCleanupTask -AllUsers -RunElevated -RunWhenLoggedOff
     #>
     [CmdletBinding(SupportsShouldProcess = $true)]
     param(
@@ -974,11 +983,17 @@ function Register-RoutineDiskCleanupTask {
         [string]$TaskName = 'RoutineDiskCleanup',
 
         [Parameter()]
-        [switch]$AllUsers
+        [switch]$AllUsers,
+
+        [Parameter()]
+        [switch]$RunWhenLoggedOff
     )
 
     if ($AllUsers -and -not $RunElevated) {
         throw '-AllUsers needs -RunElevated: an unelevated task cannot reach other users'' profiles.'
+    }
+    if ($RunWhenLoggedOff -and -not $WhatIfPreference -and -not (Test-RoutineCleanupIsElevated)) {
+        throw '-RunWhenLoggedOff needs an elevated session: Windows only lets administrators register tasks that run while signed out.'
     }
 
     $manifest = Join-Path $PSScriptRoot 'RoutineDiskCleanup.psd1'
@@ -1004,11 +1019,15 @@ function Register-RoutineDiskCleanupTask {
     $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -RunOnlyIfIdle:$false -WakeToRun:$false -ExecutionTimeLimit (New-TimeSpan -Hours 2) -MultipleInstances IgnoreNew
     $runLevel = 'Limited'
     if ($RunElevated) { $runLevel = 'Highest' }
-    $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive -RunLevel $runLevel
+    # Interactive runs only while the user is signed in; S4U runs regardless, without storing a password
+    $logonType = 'Interactive'
+    $when = 'only while you are signed in'
+    if ($RunWhenLoggedOff) { $logonType = 'S4U'; $when = 'whether or not you are signed in' }
+    $principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType $logonType -RunLevel $runLevel
 
-    if ($PSCmdlet.ShouldProcess($TaskName, "Register weekly cleanup task ($DayOfWeek at $At, log: $LogPath)")) {
+    if ($PSCmdlet.ShouldProcess($TaskName, "Register weekly cleanup task ($DayOfWeek at $At, runs $when, log: $LogPath)")) {
         Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -Principal $principal -Force | Out-Null
-        Write-Host "Registered task '$TaskName': every $DayOfWeek at $At. Log: $LogPath" -ForegroundColor Green
+        Write-Host "Registered task '$TaskName': every $DayOfWeek at $At, $when. Log: $LogPath" -ForegroundColor Green
     }
 }
 
