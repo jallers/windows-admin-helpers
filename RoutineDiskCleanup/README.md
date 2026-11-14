@@ -59,6 +59,23 @@ Invoke-RoutineDiskCleanup -Category BrowserCache, EditorCache -PassThru
 
 Locations that need elevation are skipped with a warning in an unelevated session, so a normal-user run still does everything it can.
 
+### Cleaning every account on a shared PC: `-AllUsers`
+
+By default, per-user caches (temp, crash dumps, package, shader, browser, editor, and launcher caches) are only cleaned for the account running the command. On a family or shared PC, the other accounts' caches pile up untouched; a single shader cache in another profile can hold several GB. Add `-AllUsers` from an elevated session to include every user profile:
+
+```powershell
+# Elevated: see every account's caches
+Get-RoutineDiskCleanupInfo -AllUsers | Format-Table User, Category, SizeMB, Path
+
+# Clean them
+Invoke-RoutineDiskCleanup -AllUsers -Confirm:$false
+
+# Schedule it (needs -RunElevated)
+Register-RoutineDiskCleanupTask -AllUsers -RunElevated
+```
+
+Every result carries a `User` column (`(system)` for machine-wide locations). Only real user accounts are included; service and app-pool profiles are not. Scoop, conda, and the Recycle Bin stay current-user only, since they act through that user's tools. Profiles are assumed to use the default `AppData` layout.
+
 ### 3. `Register-RoutineDiskCleanupTask` / `Unregister-RoutineDiskCleanupTask`
 
 Creates a weekly scheduled task under the current user that runs the cleanup non-interactively and appends one summary line per run to a log.
@@ -106,5 +123,5 @@ The task is registered with wake-to-run **off**, so it never wakes a sleeping PC
 - **Locked files are skipped, not forced.** A browser or build that is running keeps its files.
 - **Folders are never deleted**, only their contents, so programs that expect their cache folder to exist are not surprised.
 - **Junctions and symlinks are never followed.** A cache folder that is actually a link to somewhere else is not traversed.
-- **Elevation** is needed for system temp, system crash reports, the Windows Update categories, and ComponentStore. Everything else runs as a normal user.
+- **Elevation** is needed for system temp, system crash reports, the Windows Update categories, ComponentStore, and other users' profiles under `-AllUsers`. Everything else runs as a normal user.
 - **Dry-run first.** `Get-RoutineDiskCleanupInfo | Invoke-RoutineDiskCleanup -WhatIf` shows exactly what would be cleared.

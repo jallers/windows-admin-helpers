@@ -111,147 +111,199 @@ function Remove-RoutineCleanupFolderContents {
     }
 }
 
-function Get-RoutineCleanupTargets {
+function Get-RoutineCleanupUserProfiles {
     <#
     .SYNOPSIS
-        The catalogue of cleanup targets. Path targets are folders whose contents get deleted.
-        Command targets run a specific cleanup command instead.
+        The user profiles to clean: the current user, plus every other local or domain account's
+        profile when -AllUsers is set. Service and app-pool profiles are never included.
     #>
-    $local = $env:LOCALAPPDATA
-    $roaming = $env:APPDATA
-    $home = $env:USERPROFILE
-    $programData = $env:ProgramData
-    $windir = $env:SystemRoot
+    param([switch]$AllUsers)
+
+    $currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $current = [PSCustomObject]@{
+        Name = $env:USERNAME; Sid = $currentSid; IsCurrent = $true
+        UserHome = $env:USERPROFILE; Local = $env:LOCALAPPDATA; Roaming = $env:APPDATA
+    }
+    if (-not $AllUsers) { return @($current) }
+
+    $profiles = @($current)
+    $others = @()
+    try {
+        # S-1-5-21-* are real user accounts; this skips SYSTEM, service and IIS app-pool profiles
+        $others = Get-CimInstance Win32_UserProfile -ErrorAction Stop |
+            Where-Object { -not $_.Special -and $_.SID -like 'S-1-5-21-*' -and $_.SID -ne $currentSid -and $_.LocalPath }
+    } catch { }
+    foreach ($p in $others) {
+        if (-not (Test-Path -LiteralPath $p.LocalPath -ErrorAction SilentlyContinue)) { continue }
+        # Assumes the default AppData layout; redirected AppData folders are not followed
+        $profiles += [PSCustomObject]@{
+            Name = Split-Path $p.LocalPath -Leaf; Sid = $p.SID; IsCurrent = $false
+            UserHome = $p.LocalPath; Local = (Join-Path $p.LocalPath 'AppData\Local'); Roaming = (Join-Path $p.LocalPath 'AppData\Roaming')
+        }
+    }
+    return $profiles
+}
+
+function Get-RoutineCleanupUserTargets {
+    <#
+    .SYNOPSIS
+        Path targets that live inside one user's profile.
+    #>
+    param([string]$Local, [string]$Roaming, [string]$UserHome)
 
     $targets = @()
 
-    # --- TempFiles: always safe, but skip anything touched in the last day (installers in progress) ---
-    $targets += [PSCustomObject]@{ Category='TempFiles'; Method='Path'; Path=(Join-Path $local 'Temp'); MinAgeDays=1; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='TempFiles'; Method='Path'; Path=(Join-Path $Local 'Temp'); MinAgeDays=1; RequiresAdmin=$false; Default=$true
         Description='User temp folder. Files modified in the last 24 hours are left alone.' }
-    $targets += [PSCustomObject]@{ Category='TempFiles'; Method='Path'; Path=(Join-Path $windir 'Temp'); MinAgeDays=1; RequiresAdmin=$true; Default=$true
-        Description='System temp folder.' }
 
-    # --- CrashReports: dumps and Windows Error Reporting queues ---
-    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $local 'CrashDumps'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $Local 'CrashDumps'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Per-user application crash dumps.' }
-    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $local 'Microsoft\Windows\WER\ReportQueue'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $Local 'Microsoft\Windows\WER\ReportQueue'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Windows Error Reporting reports waiting to be sent (user).' }
-    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $local 'Microsoft\Windows\WER\ReportArchive'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $Local 'Microsoft\Windows\WER\ReportArchive'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Windows Error Reporting archived reports (user).' }
-    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $programData 'Microsoft\Windows\WER\ReportQueue'); MinAgeDays=0; RequiresAdmin=$true; Default=$true
-        Description='Windows Error Reporting reports waiting to be sent (system).' }
-    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $programData 'Microsoft\Windows\WER\ReportArchive'); MinAgeDays=0; RequiresAdmin=$true; Default=$true
-        Description='Windows Error Reporting archived reports (system).' }
-    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $windir 'Minidump'); MinAgeDays=0; RequiresAdmin=$true; Default=$true
-        Description='Kernel minidumps from blue screens.' }
-    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $windir 'LiveKernelReports'); MinAgeDays=0; RequiresAdmin=$true; Default=$true
-        Description='Live kernel reports. Can reach several GB after driver hiccups.' }
 
-    # --- PackageCache: pure download caches. The next install re-fetches what it needs. ---
-    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $local 'npm-cache\_cacache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $Local 'npm-cache\_cacache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='npm download cache.' }
-    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $local 'pip\cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $Local 'pip\cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='pip wheel and HTTP cache.' }
-    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $local 'uv\cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $Local 'uv\cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='uv package cache. Projects hard-link from here, so existing environments keep working.' }
-    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $home 'scoop\cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $UserHome 'scoop\cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Scoop installer download cache.' }
-    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Command'; Path='scoop cleanup *'; MinAgeDays=0; RequiresAdmin=$false; Default=$true
-        Description='Old versions of Scoop apps. Only versions that "current" does not point to are removed. Only runs when Scoop is installed.' }
-    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $home '.cargo\registry\cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $UserHome '.cargo\registry\cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Cargo crate download cache (.crate files).' }
-    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $local 'go-build'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $Local 'go-build'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Go build cache. Same as "go clean -cache".' }
-    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $local 'Yarn\Cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $Local 'Yarn\Cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Yarn download cache.' }
-    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $local 'NuGet\v3-cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Path'; Path=(Join-Path $Local 'NuGet\v3-cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='NuGet HTTP metadata cache.' }
-    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Command'; Path='conda clean --all'; MinAgeDays=0; RequiresAdmin=$false; Default=$true
-        Description='Conda tarballs and packages no environment links to. Only runs when conda is installed.' }
 
-    # --- DevDependencyCache (opt-in): larger caches whose loss means a slower next restore/build ---
-    $targets += [PSCustomObject]@{ Category='DevDependencyCache'; Method='Path'; Path=(Join-Path $home '.nuget\packages'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
+    $targets += [PSCustomObject]@{ Category='DevDependencyCache'; Method='Path'; Path=(Join-Path $UserHome '.nuget\packages'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
         Description='NuGet global packages folder. Next "dotnet restore" re-downloads what each project needs.' }
-    $targets += [PSCustomObject]@{ Category='DevDependencyCache'; Method='Path'; Path=(Join-Path $home '.cargo\registry\src'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
+    $targets += [PSCustomObject]@{ Category='DevDependencyCache'; Method='Path'; Path=(Join-Path $UserHome '.cargo\registry\src'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
         Description='Extracted crate sources. Rebuilt from the .crate cache on next build.' }
-    $targets += [PSCustomObject]@{ Category='DevDependencyCache'; Method='Path'; Path=(Join-Path $home '.gradle\caches'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
+    $targets += [PSCustomObject]@{ Category='DevDependencyCache'; Method='Path'; Path=(Join-Path $UserHome '.gradle\caches'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
         Description='Gradle dependency and build caches.' }
 
-    # --- ShaderCache: GPU drivers rebuild these on the next game launch ---
-    $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $local 'NVIDIA\DXCache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $Local 'NVIDIA\DXCache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='NVIDIA DirectX shader cache.' }
-    $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $local 'NVIDIA\GLCache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $Local 'NVIDIA\GLCache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='NVIDIA OpenGL shader cache.' }
-    $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $local 'AMD\DxCache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $Local 'AMD\DxCache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='AMD DirectX shader cache.' }
-    $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $local 'Intel\ShaderCache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $Local 'Intel\ShaderCache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Intel shader cache.' }
-    $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $local 'D3DSCache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $Local 'D3DSCache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Direct3D shader cache.' }
-    $steamRoot = Get-RoutineCleanupSteamRoot
-    if ($steamRoot) {
-        $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $steamRoot 'steamapps\shadercache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
-            Description='Steam per-game shader pre-caches. Steam re-downloads or rebuilds them on next launch.' }
-    }
 
-    # --- BrowserCache (opt-in): browsers should be closed; locked files are skipped ---
     $browserRoots = @(
-        @{ Name='Chrome'; Root=(Join-Path $local 'Google\Chrome\User Data') },
-        @{ Name='Edge';   Root=(Join-Path $local 'Microsoft\Edge\User Data') },
-        @{ Name='Brave';  Root=(Join-Path $local 'BraveSoftware\Brave-Browser\User Data') }
+        @{ Name='Chrome'; Root=(Join-Path $Local 'Google\Chrome\User Data') },
+        @{ Name='Edge';   Root=(Join-Path $Local 'Microsoft\Edge\User Data') },
+        @{ Name='Brave';  Root=(Join-Path $Local 'BraveSoftware\Brave-Browser\User Data') }
     )
     foreach ($browser in $browserRoots) {
-        if (-not (Test-Path -LiteralPath $browser.Root)) { continue }
-        $profiles = Get-ChildItem -LiteralPath $browser.Root -Directory -ErrorAction SilentlyContinue |
+        if (-not (Test-Path -LiteralPath $browser.Root -ErrorAction SilentlyContinue)) { continue }
+        $browserProfiles = Get-ChildItem -LiteralPath $browser.Root -Directory -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -eq 'Default' -or $_.Name -like 'Profile *' }
-        foreach ($profile in $profiles) {
+        foreach ($bp in $browserProfiles) {
             foreach ($sub in 'Cache', 'Code Cache', 'GPUCache') {
-                $targets += [PSCustomObject]@{ Category='BrowserCache'; Method='Path'; Path=(Join-Path $profile.FullName $sub); MinAgeDays=0; RequiresAdmin=$false; Default=$false
-                    Description="$($browser.Name) $($profile.Name) $sub. Close the browser first." }
+                $targets += [PSCustomObject]@{ Category='BrowserCache'; Method='Path'; Path=(Join-Path $bp.FullName $sub); MinAgeDays=0; RequiresAdmin=$false; Default=$false
+                    Description="$($browser.Name) $($bp.Name) $sub. Close the browser first." }
             }
         }
     }
 
-    # --- EditorCache (opt-in) ---
-    $targets += [PSCustomObject]@{ Category='EditorCache'; Method='Path'; Path=(Join-Path $roaming 'Code\Cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
+    $targets += [PSCustomObject]@{ Category='EditorCache'; Method='Path'; Path=(Join-Path $Roaming 'Code\Cache'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
         Description='VS Code HTTP cache. Close VS Code first.' }
-    $targets += [PSCustomObject]@{ Category='EditorCache'; Method='Path'; Path=(Join-Path $roaming 'Code\CachedData'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
+    $targets += [PSCustomObject]@{ Category='EditorCache'; Method='Path'; Path=(Join-Path $Roaming 'Code\CachedData'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
         Description='VS Code V8 code cache.' }
-    $targets += [PSCustomObject]@{ Category='EditorCache'; Method='Path'; Path=(Join-Path $roaming 'Code\CachedExtensionVSIXs'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
+    $targets += [PSCustomObject]@{ Category='EditorCache'; Method='Path'; Path=(Join-Path $Roaming 'Code\CachedExtensionVSIXs'); MinAgeDays=0; RequiresAdmin=$false; Default=$false
         Description='Downloaded extension installers VS Code keeps after installing them.' }
 
-    # --- GameLauncher: launcher self-update leftovers, logs, and embedded-browser caches ---
-    $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Command'; Path=(Join-Path $programData 'Ubisoft\Ubisoft Game Launcher\patch'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
-        Description='Old Ubisoft Connect self-update builds (~575 MB each, one per launcher update). The build named in patch.txt and the newest build are always kept. Skipped while Ubisoft Connect is running.' }
-    $steam = Get-RoutineCleanupSteamRoot
-    if ($steam) {
-        $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $steam 'logs'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
-            Description='Steam client logs.' }
-        $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $steam 'dumps'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
-            Description='Steam client crash dumps.' }
-    }
-    $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $local 'Steam\htmlcache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $Local 'Steam\htmlcache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Steam store and overlay browser cache. Close Steam first; locked files are skipped.' }
-    $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $local 'EpicGamesLauncher\Saved\Logs'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $Local 'EpicGamesLauncher\Saved\Logs'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Epic Games Launcher logs.' }
-    $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $local 'EpicGamesLauncher\Saved\webcache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
+    $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $Local 'EpicGamesLauncher\Saved\webcache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true
         Description='Epic Games Launcher browser cache. Close the launcher first.' }
 
-    # --- WindowsUpdate (admin): leftover downloads and the peer-to-peer cache ---
-    $targets += [PSCustomObject]@{ Category='WindowsUpdate'; Method='Command'; Path='Delete-DeliveryOptimizationCache'; MinAgeDays=0; RequiresAdmin=$true; Default=$true
+    return $targets
+}
+
+function Get-RoutineCleanupTargets {
+    <#
+    .SYNOPSIS
+        The catalogue of cleanup targets. Path targets are folders whose contents get deleted.
+        Command targets run a specific cleanup command instead. Each target carries the User it
+        belongs to, or '(system)' for machine-wide locations.
+    .PARAMETER AllUsers
+        Include per-user targets for every user profile on the machine, not just the current user.
+        Other users' targets require elevation.
+    #>
+    param([switch]$AllUsers)
+
+    $programData = $env:ProgramData
+    $windir = $env:SystemRoot
+    $targets = @()
+
+    # --- Per-user locations, once per profile ---
+    foreach ($p in (Get-RoutineCleanupUserProfiles -AllUsers:$AllUsers)) {
+        foreach ($t in (Get-RoutineCleanupUserTargets -Local $p.Local -Roaming $p.Roaming -UserHome $p.UserHome)) {
+            $t | Add-Member -NotePropertyName User -NotePropertyValue $p.Name
+            # Another user's profile is only reachable from an elevated session
+            if (-not $p.IsCurrent) { $t.RequiresAdmin = $true }
+            $targets += $t
+        }
+    }
+
+    # --- Commands that act on the current user's tools only ---
+    $me = $env:USERNAME
+    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Command'; Path='scoop cleanup *'; MinAgeDays=0; RequiresAdmin=$false; Default=$true; User=$me
+        Description='Old versions of Scoop apps. Only versions that "current" does not point to are removed. Only runs when Scoop is installed.' }
+    $targets += [PSCustomObject]@{ Category='PackageCache'; Method='Command'; Path='conda clean --all'; MinAgeDays=0; RequiresAdmin=$false; Default=$true; User=$me
+        Description='Conda tarballs and packages no environment links to. Only runs when conda is installed.' }
+    $targets += [PSCustomObject]@{ Category='RecycleBin'; Method='Command'; Path='Clear-RecycleBin'; MinAgeDays=0; RequiresAdmin=$false; Default=$false; User=$me
+        Description='Empties the Recycle Bin on all drives. Technically user data, so opt-in only.' }
+
+    # --- Machine-wide locations ---
+    $sysUser = '(system)'
+    $targets += [PSCustomObject]@{ Category='TempFiles'; Method='Path'; Path=(Join-Path $windir 'Temp'); MinAgeDays=1; RequiresAdmin=$true; Default=$true; User=$sysUser
+        Description='System temp folder.' }
+
+    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $programData 'Microsoft\Windows\WER\ReportQueue'); MinAgeDays=0; RequiresAdmin=$true; Default=$true; User=$sysUser
+        Description='Windows Error Reporting reports waiting to be sent (system).' }
+    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $programData 'Microsoft\Windows\WER\ReportArchive'); MinAgeDays=0; RequiresAdmin=$true; Default=$true; User=$sysUser
+        Description='Windows Error Reporting archived reports (system).' }
+    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $windir 'Minidump'); MinAgeDays=0; RequiresAdmin=$true; Default=$true; User=$sysUser
+        Description='Kernel minidumps from blue screens.' }
+    $targets += [PSCustomObject]@{ Category='CrashReports'; Method='Path'; Path=(Join-Path $windir 'LiveKernelReports'); MinAgeDays=0; RequiresAdmin=$true; Default=$true; User=$sysUser
+        Description='Live kernel reports. Can reach several GB after driver hiccups.' }
+
+    $steamRoot = Get-RoutineCleanupSteamRoot
+    if ($steamRoot) {
+        $targets += [PSCustomObject]@{ Category='ShaderCache'; Method='Path'; Path=(Join-Path $steamRoot 'steamapps\shadercache'); MinAgeDays=0; RequiresAdmin=$false; Default=$true; User=$sysUser
+            Description='Steam per-game shader pre-caches. Steam re-downloads or rebuilds them on next launch.' }
+        $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $steamRoot 'logs'); MinAgeDays=0; RequiresAdmin=$false; Default=$true; User=$sysUser
+            Description='Steam client logs.' }
+        $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Path'; Path=(Join-Path $steamRoot 'dumps'); MinAgeDays=0; RequiresAdmin=$false; Default=$true; User=$sysUser
+            Description='Steam client crash dumps.' }
+    }
+    $targets += [PSCustomObject]@{ Category='GameLauncher'; Method='Command'; Path=(Join-Path $programData 'Ubisoft\Ubisoft Game Launcher\patch'); MinAgeDays=0; RequiresAdmin=$false; Default=$true; User=$sysUser
+        Description='Old Ubisoft Connect self-update builds (~575 MB each, one per launcher update). The build named in patch.txt and the newest build are always kept. Skipped while Ubisoft Connect is running.' }
+
+    $targets += [PSCustomObject]@{ Category='WindowsUpdate'; Method='Command'; Path='Delete-DeliveryOptimizationCache'; MinAgeDays=0; RequiresAdmin=$true; Default=$true; User=$sysUser
         Description='Delivery Optimization peer cache for Windows and Store updates.' }
-    $targets += [PSCustomObject]@{ Category='WindowsUpdate'; Method='Command'; Path=(Join-Path $windir 'SoftwareDistribution\Download'); MinAgeDays=0; RequiresAdmin=$true; Default=$false
+    $targets += [PSCustomObject]@{ Category='WindowsUpdate'; Method='Command'; Path=(Join-Path $windir 'SoftwareDistribution\Download'); MinAgeDays=0; RequiresAdmin=$true; Default=$false; User=$sysUser
         Description='Downloaded update packages. Stops the Windows Update service while clearing, so opt-in only.' }
 
-    # --- ComponentStore (opt-in, admin): WinSxS cleanup via DISM ---
-    $targets += [PSCustomObject]@{ Category='ComponentStore'; Method='Command'; Path='DISM /StartComponentCleanup'; MinAgeDays=0; RequiresAdmin=$true; Default=$false
+    $targets += [PSCustomObject]@{ Category='ComponentStore'; Method='Command'; Path='DISM /StartComponentCleanup'; MinAgeDays=0; RequiresAdmin=$true; Default=$false; User=$sysUser
         Description='Removes superseded Windows components from WinSxS (DISM /Online /Cleanup-Image /StartComponentCleanup). Windows runs the same cleanup itself after a 30-day grace; this skips the wait. Slow: several minutes.' }
 
-    # --- RecycleBin (opt-in): technically user data, so never on by default ---
-    $targets += [PSCustomObject]@{ Category='RecycleBin'; Method='Command'; Path='Clear-RecycleBin'; MinAgeDays=0; RequiresAdmin=$false; Default=$false
-        Description='Empties the Recycle Bin on all drives.' }
-
-    return $targets
+    # Present in category order; Where-Object keeps insertion order within each category
+    $order = 'TempFiles', 'CrashReports', 'PackageCache', 'DevDependencyCache', 'ShaderCache', 'BrowserCache', 'EditorCache', 'GameLauncher', 'WindowsUpdate', 'ComponentStore', 'RecycleBin'
+    foreach ($c in $order) { $targets | Where-Object { $_.Category -eq $c } }
 }
 
 function ConvertFrom-DismAnalyzeOutput {
@@ -312,10 +364,23 @@ function Get-RoutineCleanupCommandSize {
             return [PSCustomObject]@{ Bytes = $bytes; Files = $files.Count; Note = 'size is an upper bound; conda keeps packages that environments still link to' }
         }
         'Delete-DeliveryOptimizationCache' {
-            $cache = Join-Path $env:ProgramData 'Microsoft\Windows\DeliveryOptimization\Cache'
-            $files = @(Get-RoutineCleanupFiles -Path $cache)
-            if ($files.Count -eq 0) { return $null }
-            return [PSCustomObject]@{ Bytes = ($files | Measure-Object -Property Length -Sum).Sum; Files = $files.Count; Note = '' }
+            # The service knows its own cache size and location; ask it first (works unelevated)
+            try {
+                $status = @(Get-DeliveryOptimizationStatus -ErrorAction Stop)
+                if ($status.Count -gt 0) {
+                    $bytes = [long]($status | Measure-Object -Property FileSizeInCache -Sum).Sum
+                    if ($bytes -gt 0) { return [PSCustomObject]@{ Bytes = $bytes; Files = $status.Count; Note = '' } }
+                }
+            } catch { }
+            # Fallback: the cache lives under the NetworkService profile on current Windows, ProgramData on older builds
+            foreach ($cache in @(
+                (Join-Path $env:SystemRoot 'ServiceProfiles\NetworkService\AppData\Local\Microsoft\Windows\DeliveryOptimization\Cache'),
+                (Join-Path $env:ProgramData 'Microsoft\Windows\DeliveryOptimization\Cache')
+            )) {
+                $files = @(Get-RoutineCleanupFiles -Path $cache)
+                if ($files.Count -gt 0) { return [PSCustomObject]@{ Bytes = ($files | Measure-Object -Property Length -Sum).Sum; Files = $files.Count; Note = '' } }
+            }
+            return $null
         }
         '*Ubisoft Game Launcher\patch' {
             $old = Get-RoutineCleanupUbisoftOldPatches -PatchRoot $Target.Path
@@ -604,12 +669,18 @@ function Get-RoutineDiskCleanupInfo {
         Only count files last modified at least this many days ago. Temp folders always use at least 1 day.
     .PARAMETER IncludeEmpty
         Also list locations that exist but currently hold nothing to clean.
+    .PARAMETER AllUsers
+        Also audit the per-user caches (temp, shader, browser, launcher, ...) of every other user
+        profile on the machine. Requires an elevated session.
     .EXAMPLE
         Get-RoutineDiskCleanupInfo
     .EXAMPLE
         Get-RoutineDiskCleanupInfo -IncludeAll | Sort-Object SizeMB -Descending | Format-Table
     .EXAMPLE
         Get-RoutineDiskCleanupInfo -Category PackageCache, ShaderCache -MinimumAgeDays 7
+    .EXAMPLE
+        # Elevated: every account's caches, grouped by user
+        Get-RoutineDiskCleanupInfo -AllUsers | Sort-Object User, SizeMB -Descending | Format-Table User, Category, SizeMB, Path
     #>
     [CmdletBinding()]
     param(
@@ -625,18 +696,25 @@ function Get-RoutineDiskCleanupInfo {
         [int]$MinimumAgeDays = 0,
 
         [Parameter()]
-        [switch]$IncludeEmpty
+        [switch]$IncludeEmpty,
+
+        [Parameter()]
+        [switch]$AllUsers
     )
 
     process {
-        $targets = Get-RoutineCleanupTargets
+        $elevated = Test-RoutineCleanupIsElevated
+        if ($AllUsers -and -not $elevated) {
+            Write-Warning "-AllUsers needs an elevated session to read other users' profiles; only the current user and readable system locations are audited."
+        }
+
+        $targets = Get-RoutineCleanupTargets -AllUsers:$AllUsers
         if ($Category) {
             $targets = $targets | Where-Object { $_.Category -in $Category }
         } elseif (-not $IncludeAll) {
             $targets = $targets | Where-Object { $_.Default }
         }
 
-        $elevated = Test-RoutineCleanupIsElevated
         $now = Get-Date
 
         foreach ($target in $targets) {
@@ -647,7 +725,7 @@ function Get-RoutineDiskCleanupInfo {
             $note = ''
 
             if ($target.Method -eq 'Path') {
-                if (-not (Test-Path -LiteralPath $target.Path)) { continue }
+                if (-not (Test-Path -LiteralPath $target.Path -ErrorAction SilentlyContinue)) { continue }
                 $files = @(Get-RoutineCleanupFiles -Path $target.Path -OlderThan $cutoff)
                 $count = $files.Count
                 if ($count -gt 0) { $bytes = ($files | Measure-Object -Property Length -Sum).Sum }
@@ -679,6 +757,7 @@ function Get-RoutineDiskCleanupInfo {
 
             [PSCustomObject]@{
                 Category      = $target.Category
+                User          = $target.User
                 Path          = $target.Path
                 Method        = $target.Method
                 FileCount     = $count
@@ -717,6 +796,9 @@ function Invoke-RoutineDiskCleanup {
         For the ComponentStore category only: add /ResetBase to the DISM cleanup. This permanently
         removes every superseded component, which frees the most space but means installed updates
         can no longer be uninstalled. Not for scheduled runs; the scheduler never sets it.
+    .PARAMETER AllUsers
+        When not piping input, also clean the per-user caches of every other user profile.
+        Requires an elevated session; other users' locations are skipped otherwise.
     .EXAMPLE
         Get-RoutineDiskCleanupInfo | Invoke-RoutineDiskCleanup -WhatIf
     .EXAMPLE
@@ -746,7 +828,10 @@ function Invoke-RoutineDiskCleanup {
         [switch]$PassThru,
 
         [Parameter()]
-        [switch]$ResetBase
+        [switch]$ResetBase,
+
+        [Parameter()]
+        [switch]$AllUsers
     )
 
     begin {
@@ -764,6 +849,7 @@ function Invoke-RoutineDiskCleanup {
             $auditParams = @{ MinimumAgeDays = $MinimumAgeDays }
             if ($Category) { $auditParams['Category'] = $Category }
             if ($IncludeAll) { $auditParams['IncludeAll'] = $true }
+            if ($AllUsers) { $auditParams['AllUsers'] = $true }
             $items = @(Get-RoutineDiskCleanupInfo @auditParams)
         }
 
@@ -785,6 +871,7 @@ function Invoke-RoutineDiskCleanup {
             }
 
             $label = "$($item.Category) at '$($item.Path)' ($($item.FileCount) files, $($item.SizeMB) MB)"
+            if ($item.PSObject.Properties['User'] -and $item.User -and $item.User -ne '(system)' -and $item.User -ne $env:USERNAME) { $label = "[$($item.User)] $label" }
             if ($ResetBase -and $item.Path -eq 'DISM /StartComponentCleanup') { $label += ' with /ResetBase (updates become un-uninstallable)' }
             if (-not $PSCmdlet.ShouldProcess($item.Path, "Clean $label")) { continue }
 
@@ -849,6 +936,8 @@ function Register-RoutineDiskCleanupTask {
         Log file to append to. Defaults to %LOCALAPPDATA%\RoutineDiskCleanup\cleanup.log.
     .PARAMETER RunElevated
         Register the task to run with highest privileges. Requires an elevated session to register.
+    .PARAMETER AllUsers
+        Also clean every other user profile's caches. Requires -RunElevated.
     .PARAMETER TaskName
         Name of the scheduled task. Defaults to 'RoutineDiskCleanup'.
     .EXAMPLE
@@ -882,8 +971,15 @@ function Register-RoutineDiskCleanupTask {
         [switch]$RunElevated,
 
         [Parameter()]
-        [string]$TaskName = 'RoutineDiskCleanup'
+        [string]$TaskName = 'RoutineDiskCleanup',
+
+        [Parameter()]
+        [switch]$AllUsers
     )
+
+    if ($AllUsers -and -not $RunElevated) {
+        throw '-AllUsers needs -RunElevated: an unelevated task cannot reach other users'' profiles.'
+    }
 
     $manifest = Join-Path $PSScriptRoot 'RoutineDiskCleanup.psd1'
     $logDir = Split-Path $LogPath -Parent
@@ -892,6 +988,7 @@ function Register-RoutineDiskCleanupTask {
     $cleanupArgs = "-MinimumAgeDays $MinimumAgeDays -Confirm:`$false -PassThru"
     if ($IncludeAll) { $cleanupArgs += ' -IncludeAll' }
     elseif ($Category) { $cleanupArgs += " -Category $($Category -join ',')" }
+    if ($AllUsers) { $cleanupArgs += ' -AllUsers' }
 
     # The task runs a one-line script: import, clean, append a summary to the log
     $script = "Import-Module '$manifest' -Force; " +
